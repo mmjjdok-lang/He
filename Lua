@@ -472,6 +472,17 @@ local function ripple(parent, x, y, color)
 	if not parent or not parent.Parent then
 		return
 	end
+	-- Rows are AutomaticSize frames: never add children that could resize them.
+	-- A simple colour flash is used instead (this is what removes the "jump").
+	if parent:IsA("GuiObject") and parent.AutomaticSize ~= Enum.AutomaticSize.None then
+		tw(parent, 0.08, { BackgroundColor3 = State.Theme.Element:Lerp(WHITE, 0.14) })
+		task.delay(0.1, function()
+			if parent.Parent then
+				tw(parent, 0.3, { BackgroundColor3 = State.Theme.Element })
+			end
+		end)
+		return
+	end
 	local layer = getRippleLayer(parent)
 	local sc = uiScaleOf(layer)
 	local ap = layer.AbsolutePosition
@@ -1052,6 +1063,55 @@ local function toKey(k)
 	return nil
 end
 
+local KB_PRESENT = UserInputService.KeyboardEnabled
+local function chipReserve()
+	return KB_PRESENT and 56 or 0
+end
+
+local function shortKeyName(k)
+	local n = k.Name
+	n = n:gsub("^Left", "L"):gsub("^Right", "R"):gsub("Control", "Ctrl"):gsub("Return", "Enter")
+	n = n:gsub("^Keypad", "Kp"):gsub("Backquote", "`"):gsub("Equals", "="):gsub("Minus", "-")
+	return n
+end
+
+-- Small keyboard-shortcut chip on a Button/Toggle row. Tap it, then press a
+-- keyboard key to bind it (Esc = cancel, Backspace/Delete = clear).
+local function makeKeyChip(win, row, entry, rightOffset)
+	if not KB_PRESENT then
+		return
+	end
+	local chip = New("TextButton", {
+		BackgroundTransparency = 0, BackgroundColor3 = State.Theme.Panel, AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -rightOffset, 0.5, 0), Size = UDim2.fromOffset(48, 24), Font = FONT_BOLD, TextSize = 10,
+		TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 6, Parent = row,
+	})
+	bind(chip, "BackgroundColor3", "Panel")
+	corner(chip, R_SMALL)
+	stroke(chip, WHITE, 1, 0.86)
+	local function update()
+		if not chip.Parent then
+			return
+		end
+		if win.Rebinding == entry then
+			chip.Text, chip.TextColor3 = "...", State.Accent
+		elseif entry.Key then
+			chip.Text = shortKeyName(entry.Key)
+			chip.TextColor3 = entry.Enabled and State.Theme.Text or State.Theme.SubText
+		else
+			chip.Text, chip.TextColor3 = "+", State.Theme.SubText
+		end
+	end
+	entry.Chips = entry.Chips or {}
+	table.insert(entry.Chips, update)
+	chip.Activated:Connect(function()
+		playSound()
+		win:_BeginRebind(entry)
+	end)
+	attachTooltip(chip, "Click, then press a keyboard key to set the shortcut")
+	update()
+end
+
 -- Right-click (PC) or long-press (mobile) pins a Button/Toggle to Favorites.
 -- Listeners are attached to the hit button (a parent frame does not receive
 -- input that begins over an Active child).
@@ -1179,7 +1239,7 @@ function Elements:CreateButton(o)
 		o = { Name = o }
 	end
 	local win = self.Window
-	local row = buildRow(self, o, o._RightReserve or 0)
+	local row = buildRow(self, o, (o._RightReserve or 0) + (o._Proxy and 0 or chipReserve()))
 	local hit = New("TextButton", { Size = UDim2.fromScale(1, 1), ZIndex = 2, Parent = row })
 	hoverFx(hit, row)
 	rippleOn(hit, row)
@@ -1193,10 +1253,11 @@ function Elements:CreateButton(o)
 		entry = win:_RegisterBind({
 			Name = o.Name or "Button", Kind = "Button", Keybind = o.Keybind,
 			Fire = function()
-				pulse(row)
 				fire()
+				pcall(pulse, row)
 			end,
 		})
+		makeKeyChip(win, row, entry, o._ChipOffset or 8)
 		entry.Proxy = function(tab)
 			tab:CreateButton({ Name = o.Name, Description = "Pinned shortcut", Callback = o.Callback, _Proxy = true })
 		end
@@ -1269,7 +1330,7 @@ function Elements:CreateButtonSettings(o)
 	local panel = createPanel(win, o.SettingsTitle or ((o.Name or "Button") .. " Settings"))
 	local obj = self:CreateButton({
 		Name = o.Name, Description = o.Description, Callback = o.Callback, Keybind = o.Keybind,
-		Tag = o.Tag, Tooltip = o.Tooltip, _RightReserve = 40,
+		Tag = o.Tag, Tooltip = o.Tooltip, _RightReserve = 40, _ChipOffset = 46,
 	})
 	local dots = New("TextButton", {
 		BackgroundTransparency = 0, BackgroundColor3 = State.Theme.Panel, AnchorPoint = Vector2.new(1, 0.5),
@@ -1294,7 +1355,7 @@ function Elements:CreateToggle(o)
 	end
 	local win = self.Window
 	local style = (o.Style == "SquareBox") and "SquareBox" or "SlidingBox"
-	local row = buildRow(self, o, (style == "SlidingBox") and 76 or 34)
+	local row = buildRow(self, o, ((style == "SlidingBox") and 76 or 34) + (o._Proxy and 0 or chipReserve()))
 	local state = false
 	local leftName, rightName = o.LeftName or "OFF", o.RightName or "ON"
 	local visual
@@ -1366,11 +1427,12 @@ function Elements:CreateToggle(o)
 		entry = win:_RegisterBind({
 			Name = o.Name or "Toggle", Kind = "Toggle", Keybind = o.Keybind,
 			Fire = function()
-				pulse(row)
 				playSound()
 				setState(not state)
+				pcall(pulse, row)
 			end,
 		})
+		makeKeyChip(win, row, entry, (style == "SlidingBox") and 88 or 46)
 		entry.Proxy = function(tab)
 			tab:CreateToggle({
 				Name = o.Name, Description = "Pinned shortcut", Style = style, Default = state, LeftName = leftName, RightName = rightName,
@@ -2225,6 +2287,28 @@ function WindowMT:_RefreshFavorites()
 	end
 end
 
+function WindowMT:_RefreshChips()
+	for _, e in ipairs(self.Binds) do
+		for _, upd in ipairs(e.Chips or {}) do
+			pcall(upd)
+		end
+	end
+	if self.KBRefresh then
+		self.KBRefresh()
+	end
+end
+
+function WindowMT:_BeginRebind(e)
+	if self.Rebinding == e then
+		self.Rebinding = nil
+		self:_RefreshChips()
+		return
+	end
+	self.Rebinding = e
+	self:_RefreshChips()
+	HE:Notify({ Title = "Shortcut", Content = "Press a keyboard key for \"" .. e.Name .. "\"  (Esc cancel, Backspace clear).", Duration = 3 })
+end
+
 function WindowMT:_Changed()
 	if self._loading or not self.AutoSave then
 		return
@@ -2320,9 +2404,7 @@ function WindowMT:LoadConfig(name, silent)
 	end
 	self._loading = false
 	self:_RefreshFavorites()
-	if self.KBRefresh then
-		self.KBRefresh()
-	end
+	self:_RefreshChips()
 	if not silent then
 		HE:Notify({ Title = "Config", Content = "Loaded: " .. name, Type = "Success", Duration = 2.5 })
 	end
@@ -2558,8 +2640,7 @@ function WindowMT:OpenKeybindManager()
 			})
 			corner(sw, R_BTN)
 			keyBtn.Activated:Connect(function()
-				win.Rebinding = e
-				keyBtn.Text = "..."
+				win:_BeginRebind(e)
 			end)
 			sw.Activated:Connect(function()
 				if not e.Key then
@@ -2567,7 +2648,7 @@ function WindowMT:OpenKeybindManager()
 					return
 				end
 				e.Enabled = not e.Enabled
-				win.KBRefresh()
+				win:_RefreshChips()
 				win:_Changed()
 			end)
 		end
@@ -2840,9 +2921,7 @@ function HE:CreateWindow(o)
 			elseif input.KeyCode ~= Enum.KeyCode.Unknown then
 				e.Key, e.Enabled = input.KeyCode, true
 			end
-			if win.KBRefresh then
-				win.KBRefresh()
-			end
+			win:_RefreshChips()
 			win:_Changed()
 			return
 		end
@@ -2870,4 +2949,3 @@ end
 HE.Destroy = destroyAll
 
 return HE
- 
